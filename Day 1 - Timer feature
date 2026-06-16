@@ -1,0 +1,29 @@
+-Asks you for a task name and a time limit.
+-Translates your requested minutes into a total pool of seconds.
+-Loops continuously, pausing for one second at a time, subtracting a second, and updating the clock on your screen without creating new lines.
+-Finishes by breaking the loop when the clock hits zero and printing a success message.
+
+
+import time
+
+def start_task_timer(task_name, minutes):
+    total_seconds = int(minutes * 60)
+    print(f"\n🚀 [WORKING ON]: {task_name}")
+    print(f"⏱️ Time allocated: {minutes} minute(s)\n")
+
+    while total_seconds > 0:
+        mins, secs = divmod(total_seconds, 60)
+        timer_display = f"{mins:02d}:{secs:02d}"
+        
+        print(f"Current Task: {task_name} | Remaining: {timer_display} ", end='\r')
+        time.sleep(1)
+        total_seconds -= 1
+        
+    print(f"\n\n✅ Done! You've successfully finished working on: '{task_name}'")
+
+current_task = input("What task are you working on right now? ")
+task_duration = float(input(f"How many minutes do you want to spend on '{current_task}'? "))
+
+start_task_timer(current_task, task_duration)
+
+
