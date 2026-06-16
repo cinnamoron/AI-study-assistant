@@ -1,0 +1,65 @@
+import time
+
+def start_task_timer(task_name, minutes):
+    total_seconds = int(minutes * 60)
+    print(f"\n🚀 [WORKING ON]: {task_name}")
+    print(f"⏱️ Time allocated: {minutes} minute(s)\n")
+
+    while total_seconds > 0:
+        mins, secs = divmod(total_seconds, 60)
+        timer_display = f"{mins:02d}:{secs:02d}"
+        
+        print(f"Current Task: {task_name} | Remaining: {timer_display} ", end='\r')
+        time.sleep(1)
+        total_seconds -= 1
+        
+    print(f"\n\n✅ Done! You've successfully finished working on: '{task_name}'")
+
+def get_time_input():
+    while True:
+        time_input = input("How long do you want to spend? (e.g., '2 hours', '30 minutes', '45 seconds'): ").strip().lower()
+        try:
+            value_str, unit = time_input.split()
+            value = float(value_str)
+            
+            if unit in ['hour', 'hours']:
+                return value * 60
+            elif unit in ['minute', 'minutes']:
+                return value
+            elif unit in ['second', 'seconds']:
+                return value / 60
+            else:
+                print("⚠️ Unrecognized unit. Please use hours, minutes, or seconds.\n")
+                
+        except ValueError:
+            print("⚠️ Invalid format. Please use a number followed by a unit (e.g., '10 minutes').\n")
+
+def main():
+    session_history = []
+    print("Welcome to your Focus Assistant! 🚀")
+
+    while True:
+        current_task = input("\nWhat task are you working on right now? ")
+        task_duration_in_minutes = get_time_input()
+
+        start_task_timer(current_task, task_duration_in_minutes)
+
+        session_history.append({
+            "task": current_task,
+            "minutes": task_duration_in_minutes
+        })
+
+        continue_session = input("\nDo you want to start another session? (y/n): ").strip().lower()
+        if continue_session != 'y':
+            print("\n--- Daily Summary ---")
+            total_time = 0
+            for session in session_history:
+                print(f"- {session['task']}: {session['minutes']} minute(s)")
+                total_time += session['minutes']
+            
+            print(f"\nTotal Focus Time: {total_time} minute(s)")
+            print("Great work today! Closing the Assistant. 👋")
+            break
+
+if __name__ == "__main__":
+    main()
