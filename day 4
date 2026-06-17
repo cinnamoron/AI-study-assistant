@@ -1,0 +1,327 @@
+import time
+import json
+import re
+import sys
+import os
+import threading
+import requests
+from datetime import datetime, timedelta
+import ollama
+
+# ── File Storage Configuration ──────────────────────────────────────────────
+SCHEDULE_FILE = "schedule.json"
+MEMORY_FILE = "memory.json"
+REMINDER_FILE = "reminders.json"
+
+
+def load_json(filename, default_factory):
+    if not os.path.exists(filename):
+        return default_factory()
+    try:
+        with open(filename, "r") as f:
+            data = json.load(f)
+            # Validate type matches expected default type
+            expected = default_factory()
+            if not isinstance(data, type(expected)):
+                return expected
+            return data
+    except Exception:
+        return default_factory()
+
+
+def save_json(filename, data):
+    try:
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"⚠️  Warning: Could not save {filename}: {e}")
+
+
+# ── Weather API Helper ──────────────────────────────────────────────────────
+def get_weather(city=None):
+    """Fetches live weather. If city is None, wttr.in uses your IP address."""
+    print("☁️  Fetching live radar data...", end="\r")
+    try:
+        location = city.strip() if city else ""
+        response = requests.get(
+            f"https://wttr.in/{location}?format=3",
+            timeout=5
+        )
+        response.raise_for_status()
+        return response.text.strip()
+    except requests.exceptions.ConnectionError:
+        return "I couldn't reach the weather satellite. Please check your internet connection."
+    except requests.exceptions.Timeout:
+        return "The weather request timed out. Try again in a moment."
+    except Exception as e:
+        return f"Weather lookup failed: {e}"
+
+
+# ── Background Alarm & Reminder Monitor ─────────────────────────────────────
+# Persists across the monitoring loop (not reset each iteration)
+_notified_tasks = set()
+
+
+def schedule_monitor():
+    """Checks the time every 15 seconds for both scheduled tasks and one-off reminders."""
+    global _notified_tasks
+
+    while True:
+        try:
+            now = datetime.now()
+            current_time_str = now.strftime("%I:%M %p").lstrip("0")
+
+            # 1. Check Daily Schedule
+            schedule = load_json(SCHEDULE_FILE, dict)
+            for sched_time, task in schedule.items():
+                clean_sched_time = sched_time.upper().strip()
+                if clean_sched_time == current_time_str and clean_sched_time not in _notified_tasks:
+                    print(f"\n\a🚨 [SCHEDULE ALARM]: It's {current_time_str}! Time to start: '{task}'")
+                    print("\nYou > ", end="", flush=True)
+                    _notified_tasks.add(clean_sched_time)
+
+            # Reset notified tasks at midnight so alarms fire again next day
+            if now.hour == 0 and now.minute == 0:
+                _notified_tasks.clear()
+
+            # 2. Check Active Reminders
+            reminders = load_json(REMINDER_FILE, list)
+            active_reminders = []
+            reminders_triggered = False
+
+            for r in reminders:
+                try:
+                    target_time = datetime.fromisoformat(r["target_time"])
+                    if now >= target_time:
+                        print(f"\n\a🔔 [REMINDER]: {r['message']}")
+                        reminders_triggered = True
+                    else:
+                        active_reminders.append(r)
+                except (KeyError, ValueError):
+                    # Skip malformed reminder entries silently
+                    pass
+
+            if reminders_triggered:
+                save_json(REMINDER_FILE, active_reminders)
+                print("\nYou > ", end="", flush=True)
+
+        except Exception as e:
+            # Don't let the monitor thread die on unexpected errors
+            print(f"\n⚠️  Monitor error: {e}")
+
+        time.sleep(15)
+
+
+# ── System Prompt Builder ───────────────────────────────────────────────────
+def build_system_prompt() -> str:
+    memories = load_json(MEMORY_FILE, list)
+    memory_string = (
+        "\n".join([f"- {m}" for m in memories])
+        if memories
+        else "No user facts memorized yet."
+    )
+
+    schedule = load_json(SCHEDULE_FILE, dict)
+    schedule_string = json.dumps(schedule, indent=2) if schedule else "Schedule is empty."
+
+    current_datetime = datetime.now().strftime("%A, %B %d, %Y | %I:%M %p")
+
+    return f"""You are an intelligent focus assistant.
+
+CURRENT DATE & TIME: {current_datetime}
+TODAY'S SCHEDULE: {schedule_string}
+USER FACTS:
+{memory_string}
+
+Analyze the user input and classify it into exactly ONE category:
+1. "command"       — User wants to start a timed focus task right now.
+2. "schedule_add"  — User wants to schedule a task for a specific time today (use format "H:MM AM/PM").
+3. "schedule_view" — User wants to see their schedule.
+4. "remember"      — User is telling you a personal fact to memorize.
+5. "reminder_add"  — User wants you to remind them of something in a specific number of minutes.
+6. "weather"       — User is asking for the weather, temperature, or forecast.
+7. "chat"          — User is asking a question, seeking motivation, or making conversation.
+
+Respond ONLY with a raw JSON object matching one of these exact formats (no markdown, no explanation):
+{{"intent": "command", "task": "<task name>", "minutes": <number>, "reply": null}}
+{{"intent": "schedule_add", "task": "<task name>", "time": "<H:MM AM/PM>", "reply": "Added."}}
+{{"intent": "schedule_view", "reply": null}}
+{{"intent": "remember", "reply": "<fact to save>"}}
+{{"intent": "reminder_add", "message": "<what to remind them of>", "minutes_delay": <number>, "reply": "Reminder set."}}
+{{"intent": "weather", "city": "<city name or null if local>", "reply": null}}
+{{"intent": "chat", "reply": "<your answer>"}}"""
+
+
+# ── Qwen Routing ─────────────────────────────────────────────────────────────
+def ask_qwen_to_process(user_input: str) -> dict:
+    """Send user input to Qwen and parse the JSON intent response."""
+    try:
+        response = ollama.chat(
+            model="qwen2.5:7b",
+            messages=[
+                {"role": "system", "content": build_system_prompt()},
+                {"role": "user", "content": user_input},
+            ],
+            stream=False,
+            keep_alive="2m",
+        )
+
+        raw = response["message"]["content"].strip()
+
+        # Strip markdown code fences if the model wraps in ```json ... ```
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        # Extract the first JSON object found in the response
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in model response.")
+
+        return json.loads(match.group())
+
+    except json.JSONDecodeError as e:
+        print(f"⚠️  JSON parse error: {e}\nRaw response: {raw}")
+        return {"intent": "chat", "reply": "Sorry, I had trouble understanding that. Could you rephrase?"}
+    except Exception as e:
+        print(f"⚠️  Model error: {e}")
+        return {"intent": "chat", "reply": "I ran into an error. Is Ollama running with qwen2.5:7b installed?"}
+
+
+# ── Core Features ─────────────────────────────────────────────────────────────
+def start_task_timer(task_name: str, minutes: float) -> float:
+    """Run a countdown timer for a focus session. Returns actual minutes spent."""
+    total_seconds = int(minutes * 60)
+    seconds_elapsed = 0
+
+    print(f"\n🚀 [WORKING ON]: {task_name}")
+    print(f"⏱️   Time allocated: {minutes} minute(s)")
+    print("   (Press Ctrl+C to stop the timer early)\n")
+
+    try:
+        while total_seconds > 0:
+            mins, secs = divmod(total_seconds, 60)
+            print(f"   ⏳ {task_name} | Remaining: {mins:02d}:{secs:02d}  ", end="\r")
+            time.sleep(1)
+            total_seconds -= 1
+            seconds_elapsed += 1
+    except KeyboardInterrupt:
+        actual_mins = round(seconds_elapsed / 60, 1)
+        print(f"\n\n⏹️   Timer stopped. Session for '{task_name}' ended after {actual_mins} min(s).")
+        return actual_mins
+
+    print(f"\n\n✅ Done! Finished working on: '{task_name}'")
+    return minutes
+
+
+# ── Intent Handlers ───────────────────────────────────────────────────────────
+def handle_intent(parsed: dict) -> None:
+    """Route the parsed intent to the correct action."""
+    intent = parsed.get("intent", "chat")
+
+    if intent == "command":
+        task = parsed.get("task", "Unnamed Task")
+        minutes = parsed.get("minutes", 25)
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            minutes = 25.0
+        start_task_timer(task, minutes)
+
+    elif intent == "schedule_add":
+        task = parsed.get("task", "Unnamed Task")
+        time_str = parsed.get("time", "").upper().strip()
+        if not time_str:
+            print("🤖 I couldn't figure out the time. Please say something like '3:00 PM'.")
+            return
+        schedule = load_json(SCHEDULE_FILE, dict)
+        schedule[time_str] = task
+        save_json(SCHEDULE_FILE, schedule)
+        print(f"🤖 Scheduled '{task}' at {time_str}.")
+
+    elif intent == "schedule_view":
+        schedule = load_json(SCHEDULE_FILE, dict)
+        if not schedule:
+            print("🤖 Your schedule is empty. Add tasks by saying 'Schedule X at Y:YY AM/PM'.")
+        else:
+            print("\n📅 TODAY'S SCHEDULE:")
+            for t, task in sorted(schedule.items()):
+                print(f"   {t} → {task}")
+            print()
+
+    elif intent == "remember":
+        fact = parsed.get("reply", "").strip()
+        if fact:
+            memories = load_json(MEMORY_FILE, list)
+            if fact not in memories:
+                memories.append(fact)
+                save_json(MEMORY_FILE, memories)
+                print(f"🤖 Got it! I'll remember: \"{fact}\"")
+            else:
+                print(f"🤖 I already know that!")
+        else:
+            print("🤖 I didn't catch what to remember. Try again?")
+
+    elif intent == "reminder_add":
+        message = parsed.get("message", "Something")
+        try:
+            delay = float(parsed.get("minutes_delay", 5))
+        except (TypeError, ValueError):
+            delay = 5.0
+        target_time = datetime.now() + timedelta(minutes=delay)
+        reminders = load_json(REMINDER_FILE, list)
+        reminders.append({
+            "message": message,
+            "target_time": target_time.isoformat()
+        })
+        save_json(REMINDER_FILE, reminders)
+        trigger_str = target_time.strftime("%I:%M %p").lstrip("0")
+        print(f"🤖 Reminder set! I'll ping you at {trigger_str}: \"{message}\"")
+
+    elif intent == "weather":
+        city = parsed.get("city") or None
+        result = get_weather(city)
+        print(f"🤖 {result}")
+
+    elif intent == "chat":
+        reply = parsed.get("reply", "...")
+        print(f"🤖 {reply}")
+
+    else:
+        print(f"🤖 I got an unknown intent: '{intent}'. Try rephrasing.")
+
+
+# ── Main Loop ─────────────────────────────────────────────────────────────────
+def main():
+    print("=" * 55)
+    print("  🧠  Focus Assistant  |  Powered by Qwen 2.5")
+    print("=" * 55)
+    print("  Commands: 'quit' or 'exit' to stop")
+    print("  Tip: Try 'What's on my schedule?' or 'Focus on coding for 30 minutes'")
+    print("=" * 55 + "\n")
+
+    # Start background monitor as a daemon thread (dies when main program exits)
+    monitor_thread = threading.Thread(target=schedule_monitor, daemon=True)
+    monitor_thread.start()
+
+    while True:
+        try:
+            user_input = input("You > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n\n👋 Goodbye! Stay focused.")
+            sys.exit(0)
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("quit", "exit", "bye"):
+            print("👋 Goodbye! Stay focused.")
+            sys.exit(0)
+
+        print("🤔 Thinking...", end="\r")
+        parsed = ask_qwen_to_process(user_input)
+        print("              ", end="\r")  # Clear "Thinking..." line
+        handle_intent(parsed)
+
+
+if __name__ == "__main__":
+    main()
