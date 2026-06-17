@@ -1,0 +1,77 @@
+import time
+import json
+import ollama
+
+def start_task_timer(task_name, minutes):
+    total_seconds = int(minutes * 60)
+    print(f"\n🚀 [WORKING ON]: {task_name}")
+    print(f"⏱️ Time allocated: {minutes} minute(s)\n")
+
+    while total_seconds > 0:
+        mins, secs = divmod(total_seconds, 60)
+        timer_display = f"{mins:02d}:{secs:02d}"
+        
+        print(f"Current Task: {task_name} | Remaining: {timer_display} ", end='\r')
+    
+        total_seconds -= 1
+        
+    print(f"\n\n✅ Done! You've successfully finished working on: '{task_name}'")
+
+def ask_gemma_to_parse(user_input):
+    prompt = f"""
+    You are a task parsing assistant. Analyze this user input: "{user_input}"
+    Extract the task name and the time duration in minutes.
+    You must respond ONLY with a raw JSON object matching this exact format:
+    {{"task": "task name", "minutes": 25}}
+    Do not include markdown formatting, backticks, or any other conversational text.
+    """
+    
+    try:
+        response = ollama.chat(
+            model='gemma4:12b',
+            messages=[{'role': 'user', 'content': prompt}]
+            keep_alive=0
+        )
+        
+        cleaned_response = response['message']['content'].strip()
+        data = json.loads(cleaned_response)
+        return data['task'], float(data['minutes'])
+    
+        
+    except Exception:
+        return None, None
+
+def main():
+    session_history = []
+    print("Welcome to your AI Focus Assistant (Gemma 4 12B Powered)! 🚀")
+
+    while True:
+        user_intent = input("\nWhat are we doing next? (e.g., 'study history for 45 minutes'): ")
+        
+        current_task, task_duration = ask_gemma_to_parse(user_intent)
+        
+        if current_task is None or task_duration is None:
+            print("⚠️ Gemma couldn't quite catch the task or time format. Let's try again.")
+            continue
+
+        start_task_timer(current_task, task_duration)
+
+        session_history.append({
+            "task": current_task,
+            "minutes": task_duration
+        })
+
+        continue_session = input("\nDo you want to start another session? (y/n): ").strip().lower()
+        if continue_session != 'y':
+            print("\n--- Daily Summary ---")
+            total_time = 0
+            for session in session_history:
+                print(f"- {session['task']}: {session['minutes']} minute(s)")
+                total_time += session['minutes']
+            
+            print(f"\nTotal Focus Time: {total_time} minute(s)")
+            print("Great work today! Closing the Assistant. 👋")
+            break
+
+if __name__ == "__main__":
+    main()
