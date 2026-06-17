@@ -134,15 +134,19 @@ USER FACTS:
 {memory_string}
 
 Analyze the user input and classify it into exactly ONE category:
-1. "command"       — User wants to start a timed focus task right now.
-2. "schedule_add"  — User wants to schedule a task for a specific time today (use format "H:MM AM/PM").
+1. "command"       — User explicitly commands you to START a timer RIGHT NOW.
+2. "schedule_add"  — User wants to SET a NEW task. (If asking ABOUT the schedule, use schedule_view).
 3. "schedule_view" — User wants to see their schedule.
 4. "remember"      — User is telling you a personal fact to memorize.
-5. "reminder_add"  — User wants you to remind them of something in a specific number of minutes.
+5. "reminder_add"  — User wants to SET a NEW reminder. (If they ask a question ABOUT a reminder, choose "chat" instead. CRITICAL: If they ask for seconds, convert it to a decimal. e.g., 30 seconds = 0.5 minutes).
 6. "weather"       — User is asking for the weather, temperature, or forecast.
-7. "chat"          — User is asking a question, seeking motivation, or making conversation.
+7. "chat"          — User is asking a question, asking for advice, or talking about an existing timer/reminder.
 
-Respond ONLY with a raw JSON object matching one of these exact formats (no markdown, no explanation):
+CRITICAL RULES FOR JSON:
+- Respond ONLY with a raw JSON object.
+- If asked for math, write it in plain text (e.g. write 'a/b', DO NOT use LaTeX like '\\frac').
+
+JSON FORMATS:
 {{"intent": "command", "task": "<task name>", "minutes": <number>, "reply": null}}
 {{"intent": "schedule_add", "task": "<task name>", "time": "<H:MM AM/PM>", "reply": "Added."}}
 {{"intent": "schedule_view", "reply": null}}
@@ -171,6 +175,9 @@ def ask_qwen_to_process(user_input: str) -> dict:
         # Strip markdown code fences if the model wraps in ```json ... ```
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s*```$", "", raw)
+
+        # Clean up unescaped backslashes (fixes LaTeX math crashes)
+        raw = re.sub(r'\\(?![/"\\bfnrt])', r'\\\\', raw)
 
         # Extract the first JSON object found in the response
         match = re.search(r"\{.*\}", raw, re.DOTALL)
